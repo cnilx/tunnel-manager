@@ -1,0 +1,7 @@
+# 运行时依赖
+PyYAML>=6.0
+psutil>=5.9.0
+Pillow>=10.0.0
+
+# 构建依赖
+pyinstaller>=6.0.0
