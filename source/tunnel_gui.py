@@ -363,6 +363,8 @@ class TunnelGUI:
                         self.manager.save_pid_info(tunnel_info)
 
                     self.root.after(0, lambda: self.log(f"完成：启动 {started_count} 个，跳过 {skipped_count} 个"))
+                    # 刷新状态
+                    self.root.after(0, self.refresh_status)
 
                 except Exception as e:
                     self.root.after(0, lambda: self.log(f"启动失败: {e}"))
