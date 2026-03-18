@@ -13,6 +13,7 @@ import time
 import yaml
 import json
 import psutil
+import socket
 from pathlib import Path
 
 # 获取程序所在目录
@@ -133,9 +134,31 @@ class TunnelManager:
 
         return cmd
 
+    def test_tunnel_connectivity(self, local_port, timeout=2, max_retries=5):
+        """测试隧道连通性"""
+        for attempt in range(max_retries):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                result = sock.connect_ex(('127.0.0.1', local_port))
+                sock.close()
+
+                if result == 0:
+                    return True
+
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+        return False
+
     def start_tunnel(self, tunnel):
         """启动单个隧道"""
         name = tunnel.get('name', '未命名隧道')
+        local_port = tunnel.get('local_port')
         cmd = self.build_ssh_command(tunnel)
 
         if not cmd:
@@ -155,12 +178,27 @@ class TunnelManager:
             # 等待一小段时间检查进程是否立即失败
             time.sleep(0.5)
             if process.poll() is not None:
-                stderr = process.stderr.read().decode('utf-8', errors='ignore')
+                return None
+
+            # 等待SSH隧道建立
+            time.sleep(2)
+
+            # 再次检查进程是否还活着
+            if process.poll() is not None:
+                return None
+
+            # 测试隧道连通性
+            if not self.test_tunnel_connectivity(local_port):
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except:
+                    process.kill()
                 return None
 
             return process
 
-        except Exception as e:
+        except Exception:
             return None
 
     def cmd_start(self):
