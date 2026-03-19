@@ -96,7 +96,8 @@ class TunnelGUI:
 
         self.manager = TunnelManager()
         self.monitor_thread = None
-        self.monitoring = True  # 自动重启默认开启
+        self.monitoring = False  # 由 start_monitor() 负责设置为 True 并创建线程
+        self._tunnel_lock = threading.Lock()  # 防止监控线程与手动操作竞态
         self.is_minimized = False  # 是否已最小化到后台
         self.tray_icon = None  # 系统托盘图标
 
@@ -397,26 +398,27 @@ class TunnelGUI:
 
                     self.root.after(0, lambda n=name: update_status_stopping(n))
 
-                    try:
-                        import psutil
-                        process = psutil.Process(pid)
-                        if process.is_running():
-                            self.root.after(0, lambda n=name, p=pid: self.log(f"关闭隧道: {n} (PID: {p})"))
-                            process.terminate()
-                            try:
-                                process.wait(timeout=3)
-                            except psutil.TimeoutExpired:
-                                process.kill()
+                    with self._tunnel_lock:
+                        try:
+                            import psutil
+                            process = psutil.Process(pid)
+                            if process.is_running():
+                                self.root.after(0, lambda n=name, p=pid: self.log(f"关闭隧道: {n} (PID: {p})"))
+                                process.terminate()
+                                try:
+                                    process.wait(timeout=3)
+                                except psutil.TimeoutExpired:
+                                    process.kill()
+                                self.manager.clear_tunnel_pid(name)
+                                self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已关闭"))
+                            else:
+                                self.manager.clear_tunnel_pid(name)
+                                self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已经停止"))
+                        except psutil.NoSuchProcess:
                             self.manager.clear_tunnel_pid(name)
-                            self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已关闭"))
-                        else:
-                            self.manager.clear_tunnel_pid(name)
-                            self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已经停止"))
-                    except psutil.NoSuchProcess:
-                        self.manager.clear_tunnel_pid(name)
-                        self.root.after(0, lambda n=name: self.log(f"隧道 {n} 进程已不存在"))
-                    except Exception as e:
-                        self.root.after(0, lambda n=name, err=e: self.log(f"关闭隧道 {n} 时出错: {err}"))
+                            self.root.after(0, lambda n=name: self.log(f"隧道 {n} 进程已不存在"))
+                        except Exception as e:
+                            self.root.after(0, lambda n=name, err=e: self.log(f"关闭隧道 {n} 时出错: {err}"))
 
                 self.root.after(0, lambda: self.log("所有隧道已关闭"))
                 self.root.after(0, self.refresh_status)
@@ -1055,12 +1057,23 @@ class TunnelGUI:
                     if not pid:
                         continue
 
-                    try:
-                        import psutil
-                        process = psutil.Process(pid)
-                        if not process.is_running():
-                            # 进程死掉了,尝试重启
-                            self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 已关闭,正在重启..."))
+                    with self._tunnel_lock:
+                        try:
+                            import psutil
+                            process = psutil.Process(pid)
+                            if not process.is_running():
+                                # 进程死掉了,尝试重启
+                                self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 已关闭,正在重启..."))
+                                new_process = self.manager.start_tunnel(tunnel)
+                                if new_process:
+                                    self.manager.update_tunnel_pid(name, new_process.pid)
+                                    self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
+                                    self.root.after(0, self.refresh_status)
+                                else:
+                                    self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
+                        except psutil.NoSuchProcess:
+                            # 进程不存在,尝试重启
+                            self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
                             new_process = self.manager.start_tunnel(tunnel)
                             if new_process:
                                 self.manager.update_tunnel_pid(name, new_process.pid)
@@ -1068,21 +1081,11 @@ class TunnelGUI:
                                 self.root.after(0, self.refresh_status)
                             else:
                                 self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
-                    except psutil.NoSuchProcess:
-                        # 进程不存在,尝试重启
-                        self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
-                        new_process = self.manager.start_tunnel(tunnel)
-                        if new_process:
-                            self.manager.update_tunnel_pid(name, new_process.pid)
-                            self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
-                            self.root.after(0, self.refresh_status)
-                        else:
-                            self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
-                    except:
-                        pass
+                        except Exception as e:
+                            self.root.after(0, lambda n=name, err=e: self.log(f"监控隧道 {n} 时出错: {err}"))
 
             except Exception as e:
-                pass
+                self.root.after(0, lambda err=e: self.log(f"监控线程异常: {err}"))
 
             time.sleep(10)  # 每10秒检查一次
 
