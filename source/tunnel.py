@@ -11,7 +11,6 @@ import signal
 import subprocess
 import time
 import yaml
-import json
 import psutil
 import socket
 from pathlib import Path
@@ -37,7 +36,6 @@ class TunnelManager:
     def __init__(self, config_file=None, pid_file=None, quiet=False):
         # 使用程序所在目录的绝对路径
         self.config_file = str(BASE_DIR / (config_file or "tunnels.yaml"))
-        self.pid_file = str(BASE_DIR / (pid_file or ".tunnels.pid"))
         self.quiet = quiet
         self.tunnels = []
         self.processes = []
@@ -58,6 +56,10 @@ class TunnelManager:
             self.tunnels = []
         else:
             self.tunnels = config['tunnels'] if config['tunnels'] else []
+            # 确保每个隧道都有 pid 字段
+            for tunnel in self.tunnels:
+                if 'pid' not in tunnel:
+                    tunnel['pid'] = None
 
         return self.tunnels
 
@@ -67,36 +69,50 @@ class TunnelManager:
         with open(self.config_file, 'w', encoding='utf-8') as f:
             yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
-    def save_pid_info(self, tunnel_info):
-        """保存隧道进程信息到文件"""
-        pid_data = []
-        if Path(self.pid_file).exists():
-            try:
-                with open(self.pid_file, 'r', encoding='utf-8') as f:
-                    pid_data = json.load(f)
-            except:
-                pid_data = []
+    def update_tunnel_pid(self, tunnel_name, pid):
+        """更新指定隧道的 PID"""
+        for tunnel in self.tunnels:
+            if tunnel.get('name') == tunnel_name:
+                tunnel['pid'] = pid
+                break
+        self.save_config()
 
-        pid_data.extend(tunnel_info)
+    def clear_tunnel_pid(self, tunnel_name):
+        """清除指定隧道的 PID"""
+        for tunnel in self.tunnels:
+            if tunnel.get('name') == tunnel_name:
+                tunnel['pid'] = None
+                break
+        self.save_config()
 
-        with open(self.pid_file, 'w', encoding='utf-8') as f:
-            json.dump(pid_data, f, ensure_ascii=False, indent=2)
+    def clear_all_pids(self):
+        """清除所有隧道的 PID"""
+        for tunnel in self.tunnels:
+            tunnel['pid'] = None
+        self.save_config()
 
-    def load_pid_info(self):
-        """从文件加载隧道进程信息"""
-        if not Path(self.pid_file).exists():
-            return []
+    def get_running_tunnels(self):
+        """获取所有运行中的隧道信息"""
+        running = []
+        for tunnel in self.tunnels:
+            pid = tunnel.get('pid')
+            if pid:
+                try:
+                    process = psutil.Process(pid)
+                    if process.is_running():
+                        running.append(tunnel)
+                    else:
+                        # 进程已停止，清除 PID
+                        tunnel['pid'] = None
+                except psutil.NoSuchProcess:
+                    # 进程不存在，清除 PID
+                    tunnel['pid'] = None
 
-        try:
-            with open(self.pid_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return []
+        # 如果有 PID 被清除，保存配置
+        if any(t.get('pid') is None for t in self.tunnels):
+            self.save_config()
 
-    def clear_pid_info(self):
-        """清除 PID 文件"""
-        if Path(self.pid_file).exists():
-            os.remove(self.pid_file)
+        return running
 
     def build_ssh_command(self, tunnel):
         """构建 SSH 命令"""
@@ -209,15 +225,15 @@ class TunnelManager:
         print()
 
         # 检查是否已有运行的隧道
-        existing = self.load_pid_info()
-        if existing:
+        self.load_config()
+        running = self.get_running_tunnels()
+        if running:
             print("⚠️  检测到已有运行的隧道，请先使用 stop.bat 关闭")
             print()
             self.cmd_status()
             sys.exit(1)
 
-        self.load_config()
-        tunnel_info = []
+        success_count = 0
 
         for tunnel in self.tunnels:
             name = tunnel.get('name', '未命名隧道')
@@ -225,26 +241,19 @@ class TunnelManager:
 
             process = self.start_tunnel(tunnel)
             if process:
-                info = {
-                    'name': name,
-                    'pid': process.pid,
-                    'config': tunnel
-                }
-                tunnel_info.append(info)
+                self.update_tunnel_pid(name, process.pid)
+                success_count += 1
                 print(f"✅ 隧道已建立 (PID: {process.pid})")
             else:
                 print(f"❌ 启动失败")
             print()
 
-        if not tunnel_info:
+        if success_count == 0:
             print("❌ 没有成功启动任何隧道")
             sys.exit(1)
 
-        # 保存进程信息
-        self.save_pid_info(tunnel_info)
-
         print("=" * 60)
-        print(f"✅ 成功启动 {len(tunnel_info)} 个隧道")
+        print(f"✅ 成功启动 {success_count} 个隧道")
         print("=" * 60)
         print()
 
@@ -253,10 +262,10 @@ class TunnelManager:
 
     def cmd_status(self):
         """查看隧道状态"""
-        tunnel_info = self.load_pid_info()
+        self.load_config()
 
-        if not tunnel_info:
-            print("⚠️  没有运行中的隧道")
+        if not self.tunnels:
+            print("⚠️  没有配置任何隧道")
             return
 
         print("=" * 60)
@@ -265,25 +274,26 @@ class TunnelManager:
         print()
 
         active_count = 0
-        dead_pids = []
 
-        for idx, item in enumerate(tunnel_info, 1):
-            pid = item['pid']
-            name = item['name']
-            tunnel = item['config']
+        for idx, tunnel in enumerate(self.tunnels, 1):
+            pid = tunnel.get('pid')
+            name = tunnel.get('name', '未命名隧道')
 
             # 检查进程是否还在运行
-            try:
-                process = psutil.Process(pid)
-                if process.is_running():
-                    status = "✅ 运行中"
-                    active_count += 1
-                else:
+            if pid:
+                try:
+                    process = psutil.Process(pid)
+                    if process.is_running():
+                        status = "✅ 运行中"
+                        active_count += 1
+                    else:
+                        status = "❌ 已停止"
+                        tunnel['pid'] = None
+                except psutil.NoSuchProcess:
                     status = "❌ 已停止"
-                    dead_pids.append(pid)
-            except psutil.NoSuchProcess:
-                status = "❌ 已停止"
-                dead_pids.append(pid)
+                    tunnel['pid'] = None
+            else:
+                status = "⚪ 未启动"
 
             local_port = tunnel.get('local_port')
             remote_host = tunnel.get('remote_host', '127.0.0.1')
@@ -292,26 +302,23 @@ class TunnelManager:
 
             print(f"{idx}. {name} - {status}")
             print(f"   本地端口 {local_port} → {ssh_host} → {remote_host}:{remote_port}")
-            print(f"   进程 PID: {pid}")
+            if pid:
+                print(f"   进程 PID: {pid}")
             print()
 
-        print("=" * 60)
-        print(f"活跃隧道: {active_count}/{len(tunnel_info)}")
-        print("=" * 60)
+        # 保存更新后的配置（清除已停止进程的 PID）
+        self.save_config()
 
-        # 清理已停止的进程记录
-        if dead_pids:
-            tunnel_info = [t for t in tunnel_info if t['pid'] not in dead_pids]
-            if tunnel_info:
-                self.save_pid_info(tunnel_info)
-            else:
-                self.clear_pid_info()
+        print("=" * 60)
+        print(f"活跃隧道: {active_count}/{len(self.tunnels)}")
+        print("=" * 60)
 
     def cmd_stop(self):
         """关闭所有隧道"""
-        tunnel_info = self.load_pid_info()
+        self.load_config()
+        running = self.get_running_tunnels()
 
-        if not tunnel_info:
+        if not running:
             print("⚠️  没有运行中的隧道")
             return
 
@@ -320,9 +327,9 @@ class TunnelManager:
         print("=" * 60)
         print()
 
-        for item in tunnel_info:
-            pid = item['pid']
-            name = item['name']
+        for tunnel in running:
+            pid = tunnel.get('pid')
+            name = tunnel.get('name', '未命名隧道')
 
             try:
                 process = psutil.Process(pid)
@@ -334,17 +341,17 @@ class TunnelManager:
                     except psutil.TimeoutExpired:
                         process.kill()
                     print(f"✅ 已关闭")
+                    self.clear_tunnel_pid(name)
                 else:
                     print(f"⚠️  隧道 '{name}' 已经停止")
+                    self.clear_tunnel_pid(name)
             except psutil.NoSuchProcess:
                 print(f"⚠️  隧道 '{name}' 进程不存在")
+                self.clear_tunnel_pid(name)
             except Exception as e:
                 print(f"❌ 关闭隧道 '{name}' 时出错: {e}")
 
             print()
-
-        # 清除 PID 文件
-        self.clear_pid_info()
 
         print("=" * 60)
         print("✅ 所有隧道已关闭")

@@ -208,13 +208,6 @@ class TunnelGUI:
         try:
             # 加载配置
             self.manager.load_config()
-            tunnel_info = self.manager.load_pid_info()
-
-            # 创建PID映射
-            pid_map = {item['name']: item for item in tunnel_info}
-
-            # 用于记录需要清理的过期PID
-            dead_pids = []
 
             # 显示所有隧道
             for tunnel in self.manager.tunnels:
@@ -223,12 +216,12 @@ class TunnelGUI:
                 remote_host = tunnel.get('remote_host', '127.0.0.1')
                 remote_port = tunnel.get('remote_port')
                 ssh_host = tunnel.get('ssh_host')
+                pid = tunnel.get('pid')
 
                 remote_addr = f"{ssh_host} -> {remote_host}:{remote_port}"
 
                 # 检查进程状态
-                if name in pid_map:
-                    pid = pid_map[name]['pid']
+                if pid:
                     try:
                         import psutil
                         process = psutil.Process(pid)
@@ -239,18 +232,17 @@ class TunnelGUI:
                             status = "未启动"
                             tag = "stopped"
                             pid = "-"
-                            dead_pids.append(name)
+                            tunnel['pid'] = None
                     except psutil.NoSuchProcess:
-                        # 进程不存在，标记为需要清理
                         status = "未启动"
                         tag = "stopped"
                         pid = "-"
-                        dead_pids.append(name)
+                        tunnel['pid'] = None
                     except Exception:
                         status = "未启动"
                         tag = "stopped"
                         pid = "-"
-                        dead_pids.append(name)
+                        tunnel['pid'] = None
                 else:
                     status = "未启动"
                     tag = "stopped"
@@ -262,14 +254,8 @@ class TunnelGUI:
                 self.tree.tag_configure("starting", foreground="orange")
                 self.tree.item(item_id, tags=(tag,))
 
-            # 清理过期的PID信息
-            if dead_pids:
-                tunnel_info = [t for t in tunnel_info if t['name'] not in dead_pids]
-                if tunnel_info:
-                    with open(self.manager.pid_file, 'w', encoding='utf-8') as f:
-                        json.dump(tunnel_info, f, ensure_ascii=False, indent=2)
-                else:
-                    self.manager.clear_pid_info()
+            # 保存更新后的配置
+            self.manager.save_config()
 
             self.log("状态已刷新")
 
@@ -286,18 +272,19 @@ class TunnelGUI:
             def start_thread():
                 try:
                     self.manager.load_config()
-                    tunnel_info = self.manager.load_pid_info()
 
                     # 创建已运行隧道的名称集合
                     running_names = set()
-                    for item in tunnel_info:
-                        try:
-                            import psutil
-                            process = psutil.Process(item['pid'])
-                            if process.is_running():
-                                running_names.add(item['name'])
-                        except:
-                            pass
+                    for tunnel in self.manager.tunnels:
+                        pid = tunnel.get('pid')
+                        if pid:
+                            try:
+                                import psutil
+                                process = psutil.Process(pid)
+                                if process.is_running():
+                                    running_names.add(tunnel.get('name'))
+                            except:
+                                pass
 
                     # 找到需要启动的隧道
                     tunnels_to_start = []
@@ -340,10 +327,11 @@ class TunnelGUI:
                                 break
 
                     # 并行启动所有隧道
-                    started_tunnels = []
+                    started_count = 0
                     start_threads = []
 
                     def start_single_tunnel(tunnel):
+                        nonlocal started_count
                         name = tunnel.get('name', '未命名隧道')
                         self.root.after(0, lambda n=name: update_status_starting(n))
                         self.root.after(0, lambda n=name: self.log(f"启动隧道: {n}"))
@@ -351,12 +339,8 @@ class TunnelGUI:
                         process = self.manager.start_tunnel(tunnel)
 
                         if process:
-                            info = {
-                                'name': name,
-                                'pid': process.pid,
-                                'config': tunnel
-                            }
-                            started_tunnels.append(info)
+                            self.manager.update_tunnel_pid(name, process.pid)
+                            started_count += 1
                             self.root.after(0, lambda n=name, p=process.pid: update_status_running(n, p))
                             self.root.after(0, lambda n=name, p=process.pid: self.log(f"隧道 {n} 已启动 (PID: {p})"))
                         else:
@@ -373,12 +357,7 @@ class TunnelGUI:
                     for t in start_threads:
                         t.join()
 
-                    # 保存进程信息
-                    if started_tunnels:
-                        tunnel_info.extend(started_tunnels)
-                        self.manager.save_pid_info(tunnel_info)
-
-                    self.root.after(0, lambda: self.log(f"完成：启动 {len(started_tunnels)} 个，跳过 {len(running_names)} 个"))
+                    self.root.after(0, lambda: self.log(f"完成：启动 {started_count} 个，跳过 {len(running_names)} 个"))
 
                 except Exception as e:
                     self.root.after(0, lambda: self.log(f"启动失败: {e}"))
@@ -397,11 +376,16 @@ class TunnelGUI:
 
             # 在后台线程中执行
             def stop_thread():
-                tunnel_info = self.manager.load_pid_info()
+                self.manager.load_config()
+                running = self.manager.get_running_tunnels()
 
-                for item in tunnel_info:
-                    pid = item['pid']
-                    name = item['name']
+                if not running:
+                    self.root.after(0, lambda: self.log("没有运行中的隧道"))
+                    return
+
+                for tunnel in running:
+                    pid = tunnel.get('pid')
+                    name = tunnel.get('name')
 
                     # 找到对应的表格项并显示"正在停止..."
                     def update_status_stopping(tunnel_name):
@@ -417,22 +401,22 @@ class TunnelGUI:
                         import psutil
                         process = psutil.Process(pid)
                         if process.is_running():
-                            self.root.after(0, lambda n=name: self.log(f"关闭隧道: {n} (PID: {pid})"))
+                            self.root.after(0, lambda n=name, p=pid: self.log(f"关闭隧道: {n} (PID: {p})"))
                             process.terminate()
                             try:
                                 process.wait(timeout=3)
                             except psutil.TimeoutExpired:
                                 process.kill()
+                            self.manager.clear_tunnel_pid(name)
                             self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已关闭"))
                         else:
+                            self.manager.clear_tunnel_pid(name)
                             self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已经停止"))
                     except psutil.NoSuchProcess:
+                        self.manager.clear_tunnel_pid(name)
                         self.root.after(0, lambda n=name: self.log(f"隧道 {n} 进程已不存在"))
                     except Exception as e:
                         self.root.after(0, lambda n=name, err=e: self.log(f"关闭隧道 {n} 时出错: {err}"))
-
-                # 清除 PID 文件
-                self.manager.clear_pid_info()
 
                 self.root.after(0, lambda: self.log("所有隧道已关闭"))
                 self.root.after(0, self.refresh_status)
@@ -452,18 +436,7 @@ class TunnelGUI:
 
         # 在后台线程中执行启动
         def start_thread():
-            tunnel_info = self.manager.load_pid_info()
-
-            # 创建已运行隧道的名称集合
-            running_names = set()
-            for item in tunnel_info:
-                try:
-                    import psutil
-                    process = psutil.Process(item['pid'])
-                    if process.is_running():
-                        running_names.add(item['name'])
-                except:
-                    pass
+            self.manager.load_config()
 
             # 找到需要启动的隧道
             tunnels_to_start = []
@@ -471,24 +444,31 @@ class TunnelGUI:
                 values = self.tree.item(item_id)['values']
                 name = values[0]
 
-                # 如果已经在运行，跳过
-                if name in running_names:
-                    self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已在运行，跳过"))
-                    continue
-
                 # 查找对应的隧道配置
                 tunnel = next((t for t in self.manager.tunnels if t.get('name') == name), None)
                 if tunnel:
+                    pid = tunnel.get('pid')
+                    # 如果已经在运行，跳过
+                    if pid:
+                        try:
+                            import psutil
+                            process = psutil.Process(pid)
+                            if process.is_running():
+                                self.root.after(0, lambda n=name: self.log(f"隧道 {n} 已在运行，跳过"))
+                                continue
+                        except:
+                            pass
                     tunnels_to_start.append((item_id, tunnel))
 
             if not tunnels_to_start:
                 return
 
             # 并行启动所有选中的隧道
-            started_tunnels = []
+            started_count = 0
             start_threads = []
 
             def start_single_tunnel(item_id, tunnel):
+                nonlocal started_count
                 name = tunnel.get('name', '未命名隧道')
                 self.root.after(0, lambda i=item_id: self.tree.set(i, "状态", "启动中"))
                 self.root.after(0, lambda i=item_id: self.tree.item(i, tags=("starting",)))
@@ -497,12 +477,8 @@ class TunnelGUI:
                 process = self.manager.start_tunnel(tunnel)
 
                 if process:
-                    info = {
-                        'name': name,
-                        'pid': process.pid,
-                        'config': tunnel
-                    }
-                    started_tunnels.append(info)
+                    self.manager.update_tunnel_pid(name, process.pid)
+                    started_count += 1
                     self.root.after(0, lambda i=item_id: self.tree.set(i, "状态", "运行中"))
                     self.root.after(0, lambda i=item_id, p=process.pid: self.tree.set(i, "PID", str(p)))
                     self.root.after(0, lambda i=item_id: self.tree.item(i, tags=("running",)))
@@ -523,11 +499,6 @@ class TunnelGUI:
             for t in start_threads:
                 t.join()
 
-            # 保存进程信息
-            if started_tunnels:
-                tunnel_info.extend(started_tunnels)
-                self.manager.save_pid_info(tunnel_info)
-
         threading.Thread(target=start_thread, daemon=True).start()
 
     def stop_selected(self):
@@ -537,29 +508,33 @@ class TunnelGUI:
             messagebox.showwarning("提示", "请先选择要停止的隧道")
             return
 
-        tunnel_info = self.manager.load_pid_info()
+        self.manager.load_config()
 
         for item_id in selection:
             values = self.tree.item(item_id)['values']
             name = values[0]
 
-            # 查找对应的进程
-            item = next((t for t in tunnel_info if t['name'] == name), None)
-            if item:
-                try:
-                    import psutil
-                    process = psutil.Process(item['pid'])
-                    if process.is_running():
-                        process.terminate()
-                        process.wait(timeout=3)
-                        self.log(f"隧道 {name} 已关闭")
-                    else:
-                        self.log(f"隧道 {name} 已经关闭")
-                except psutil.NoSuchProcess:
-                    # 进程已经不存在了，只记录日志不报错
-                    self.log(f"隧道 {name} 进程已不存在，已清理")
-                except Exception as e:
-                    self.log(f"停止隧道 {name} 失败: {e}")
+            # 查找对应的隧道配置
+            tunnel = next((t for t in self.manager.tunnels if t.get('name') == name), None)
+            if tunnel:
+                pid = tunnel.get('pid')
+                if pid:
+                    try:
+                        import psutil
+                        process = psutil.Process(pid)
+                        if process.is_running():
+                            process.terminate()
+                            process.wait(timeout=3)
+                            self.manager.clear_tunnel_pid(name)
+                            self.log(f"隧道 {name} 已关闭")
+                        else:
+                            self.manager.clear_tunnel_pid(name)
+                            self.log(f"隧道 {name} 已经关闭")
+                    except psutil.NoSuchProcess:
+                        self.manager.clear_tunnel_pid(name)
+                        self.log(f"隧道 {name} 进程已不存在，已清理")
+                    except Exception as e:
+                        self.log(f"停止隧道 {name} 失败: {e}")
 
         self.refresh_status()
 
@@ -603,24 +578,16 @@ class TunnelGUI:
                 # 如果隧道正在运行，先停止它
                 if was_running:
                     self.log(f"隧道 {old_name} 正在运行，先停止...")
-                    tunnel_info = self.manager.load_pid_info()
-                    item = next((t for t in tunnel_info if t['name'] == old_name), None)
-                    if item:
+                    pid = tunnel.get('pid')
+                    if pid:
                         try:
                             import psutil
-                            process = psutil.Process(item['pid'])
+                            process = psutil.Process(pid)
                             if process.is_running():
                                 process.terminate()
                                 process.wait(timeout=3)
                                 self.log(f"隧道 {old_name} 已关闭")
-
-                            # 从PID信息中移除
-                            tunnel_info = [t for t in tunnel_info if t['name'] != old_name]
-                            if tunnel_info:
-                                with open(self.manager.pid_file, 'w', encoding='utf-8') as f:
-                                    json.dump(tunnel_info, f, ensure_ascii=False, indent=2)
-                            else:
-                                self.manager.clear_pid_info()
+                            self.manager.clear_tunnel_pid(old_name)
                         except Exception as e:
                             self.log(f"停止隧道失败: {e}")
 
@@ -635,14 +602,7 @@ class TunnelGUI:
                     self.log(f"正在重启隧道: {dialog.result['name']}")
                     process = self.manager.start_tunnel(dialog.result)
                     if process:
-                        tunnel_info = self.manager.load_pid_info()
-                        info = {
-                            'name': dialog.result['name'],
-                            'pid': process.pid,
-                            'config': dialog.result
-                        }
-                        tunnel_info.append(info)
-                        self.manager.save_pid_info(tunnel_info)
+                        self.manager.update_tunnel_pid(dialog.result['name'], process.pid)
                         self.log(f"隧道 {dialog.result['name']} 已重启 (PID: {process.pid})")
                     else:
                         self.log(f"隧道 {dialog.result['name']} 重启失败")
@@ -892,18 +852,20 @@ class TunnelGUI:
     def update_auto_start_status(self):
         """更新所有隧道的auto_start状态"""
         try:
-            tunnel_info = self.manager.load_pid_info()
+            self.manager.load_config()
             running_names = set()
 
             # 获取当前运行的隧道名称
-            for item in tunnel_info:
-                try:
-                    import psutil
-                    process = psutil.Process(item['pid'])
-                    if process.is_running():
-                        running_names.add(item['name'])
-                except:
-                    pass
+            for tunnel in self.manager.tunnels:
+                pid = tunnel.get('pid')
+                if pid:
+                    try:
+                        import psutil
+                        process = psutil.Process(pid)
+                        if process.is_running():
+                            running_names.add(tunnel.get('name'))
+                    except:
+                        pass
 
             # 更新配置中的auto_start字段
             for tunnel in self.manager.tunnels:
@@ -959,10 +921,11 @@ class TunnelGUI:
                             break
 
                 # 并行启动所有隧道
-                started_tunnels = []
+                started_count = 0
                 start_threads = []
 
                 def start_single_tunnel(tunnel):
+                    nonlocal started_count
                     name = tunnel.get('name', '未命名隧道')
                     self.root.after(0, lambda n=name: update_status_starting(n))
                     self.root.after(0, lambda n=name: self.log(f"自动启动隧道: {n}"))
@@ -970,12 +933,8 @@ class TunnelGUI:
                     process = self.manager.start_tunnel(tunnel)
 
                     if process:
-                        info = {
-                            'name': name,
-                            'pid': process.pid,
-                            'config': tunnel
-                        }
-                        started_tunnels.append(info)
+                        self.manager.update_tunnel_pid(name, process.pid)
+                        started_count += 1
                         self.root.after(0, lambda n=name, p=process.pid: update_status_running(n, p))
                         self.root.after(0, lambda n=name, p=process.pid: self.log(f"隧道 {n} 已启动 (PID: {p})"))
                     else:
@@ -992,11 +951,7 @@ class TunnelGUI:
                 for t in start_threads:
                     t.join()
 
-                # 保存进程信息
-                if started_tunnels:
-                    self.manager.save_pid_info(started_tunnels)
-
-                self.root.after(0, lambda: self.log(f"自动启动完成：成功 {len(started_tunnels)} 个"))
+                self.root.after(0, lambda: self.log(f"自动启动完成：成功 {started_count} 个"))
 
             threading.Thread(target=start_thread, daemon=True).start()
 
@@ -1091,12 +1046,14 @@ class TunnelGUI:
         """监控隧道进程,自动重启死掉的进程"""
         while self.monitoring:
             try:
-                tunnel_info = self.manager.load_pid_info()
+                self.manager.load_config()
 
-                for item in tunnel_info:
-                    name = item['name']
-                    pid = item['pid']
-                    tunnel = item['config']
+                for tunnel in self.manager.tunnels:
+                    name = tunnel.get('name')
+                    pid = tunnel.get('pid')
+
+                    if not pid:
+                        continue
 
                     try:
                         import psutil
@@ -1106,12 +1063,21 @@ class TunnelGUI:
                             self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 已关闭,正在重启..."))
                             new_process = self.manager.start_tunnel(tunnel)
                             if new_process:
-                                item['pid'] = new_process.pid
-                                self.manager.save_pid_info(tunnel_info)
+                                self.manager.update_tunnel_pid(name, new_process.pid)
                                 self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
                                 self.root.after(0, self.refresh_status)
                             else:
                                 self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
+                    except psutil.NoSuchProcess:
+                        # 进程不存在,尝试重启
+                        self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
+                        new_process = self.manager.start_tunnel(tunnel)
+                        if new_process:
+                            self.manager.update_tunnel_pid(name, new_process.pid)
+                            self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
+                            self.root.after(0, self.refresh_status)
+                        else:
+                            self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
                     except:
                         pass
 
