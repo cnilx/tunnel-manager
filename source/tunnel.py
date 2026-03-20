@@ -133,7 +133,8 @@ class TunnelManager:
             return None
 
         # 构建端口转发参数（仅支持本地转发 -L）
-        forward_arg = f"-L {local_port}:{remote_host}:{remote_port}"
+        local_bind = tunnel.get('local_bind', '127.0.0.1')
+        forward_arg = f"-L {local_bind}:{local_port}:{remote_host}:{remote_port}"
 
         # 构建完整命令
         cmd = [
