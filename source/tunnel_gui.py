@@ -1063,10 +1063,9 @@ class TunnelGUI:
                     port_reachable = None  # None 表示跳过探测
                     if isinstance(local_port, int) and 1 <= local_port <= 65535:
                         try:
-                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            sock.settimeout(1.5)
-                            result = sock.connect_ex(('127.0.0.1', local_port))
-                            sock.close()
+                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                                sock.settimeout(1.5)
+                                result = sock.connect_ex(('127.0.0.1', local_port))
                             port_reachable = (result == 0)
                         except Exception:
                             port_reachable = False
@@ -1088,6 +1087,7 @@ class TunnelGUI:
                             elif port_reachable is False:
                                 # 进程存活但端口不通,重连
                                 self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 不通，正在重连..."))
+                                terminate_ok = True
                                 try:
                                     process.terminate()
                                     try:
@@ -1097,15 +1097,17 @@ class TunnelGUI:
                                             process.kill()
                                         except Exception as kill_err:
                                             self.root.after(0, lambda n=name, err=kill_err: self.log(f"隧道 {n} 强制终止失败: {err}"))
-                                except Exception:
-                                    pass
-                                new_process = self.manager.start_tunnel(tunnel)
-                                if new_process:
-                                    self.manager.update_tunnel_pid(name, new_process.pid)
-                                    self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重连 (PID: {p})"))
-                                    self.root.after(0, self.refresh_status)
-                                else:
-                                    self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重连失败"))
+                                except Exception as term_err:
+                                    self.root.after(0, lambda n=name, err=term_err: self.log(f"隧道 {n} 终止失败，跳过重连: {err}"))
+                                    terminate_ok = False
+                                if terminate_ok:
+                                    new_process = self.manager.start_tunnel(tunnel)
+                                    if new_process:
+                                        self.manager.update_tunnel_pid(name, new_process.pid)
+                                        self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重连 (PID: {p})"))
+                                        self.root.after(0, self.refresh_status)
+                                    else:
+                                        self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重连失败"))
                         except psutil.NoSuchProcess:
                             # 进程不存在,尝试重启
                             self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
