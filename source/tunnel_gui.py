@@ -99,6 +99,7 @@ class TunnelGUI:
         self.monitor_thread = None
         self.monitoring = False  # 由 start_monitor() 负责设置为 True 并创建线程
         self._tunnel_lock = threading.Lock()  # 防止监控线程与手动操作竞态
+        self._restarting_tunnels = set()  # 正在重启/重连中的隧道名称
         self.is_minimized = False  # 是否已最小化到后台
         self.tray_icon = None  # 系统托盘图标
 
@@ -223,7 +224,11 @@ class TunnelGUI:
                 remote_addr = f"{ssh_host} -> {remote_host}:{remote_port}"
 
                 # 检查进程状态
-                if pid:
+                if name in self._restarting_tunnels:
+                    status = "重启中"
+                    tag = "starting"
+                    pid = "-"
+                elif pid:
                     try:
                         import psutil
                         process = psutil.Process(pid)
@@ -1077,7 +1082,10 @@ class TunnelGUI:
                             if not process.is_running():
                                 # 进程死掉了,尝试重启
                                 self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 已关闭,正在重启..."))
+                                self._restarting_tunnels.add(name)
+                                self.root.after(0, self.refresh_status)
                                 new_process = self.manager.start_tunnel(tunnel)
+                                self._restarting_tunnels.discard(name)
                                 if new_process:
                                     self.manager.update_tunnel_pid(name, new_process.pid)
                                     self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
@@ -1089,6 +1097,8 @@ class TunnelGUI:
                             elif port_reachable is False:
                                 # 进程存活但端口不通,重连
                                 self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 不通，正在重连..."))
+                                self._restarting_tunnels.add(name)
+                                self.root.after(0, self.refresh_status)
                                 terminate_ok = True
                                 try:
                                     process.terminate()
@@ -1104,6 +1114,7 @@ class TunnelGUI:
                                     terminate_ok = False
                                 if terminate_ok:
                                     new_process = self.manager.start_tunnel(tunnel)
+                                    self._restarting_tunnels.discard(name)
                                     if new_process:
                                         self.manager.update_tunnel_pid(name, new_process.pid)
                                         self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重连 (PID: {p})"))
@@ -1113,12 +1124,16 @@ class TunnelGUI:
                                         self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重连失败"))
                                         self.root.after(0, self.refresh_status)
                                 else:
+                                    self._restarting_tunnels.discard(name)
                                     self.manager.clear_tunnel_pid(name)
                                     self.root.after(0, self.refresh_status)
                         except psutil.NoSuchProcess:
                             # 进程不存在,尝试重启
                             self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
+                            self._restarting_tunnels.add(name)
+                            self.root.after(0, self.refresh_status)
                             new_process = self.manager.start_tunnel(tunnel)
+                            self._restarting_tunnels.discard(name)
                             if new_process:
                                 self.manager.update_tunnel_pid(name, new_process.pid)
                                 self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
