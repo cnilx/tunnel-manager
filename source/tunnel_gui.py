@@ -141,7 +141,7 @@ class TunnelGUI:
         list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # 创建表格
-        columns = ("名称", "状态", "本地端口", "远程地址", "PID")
+        columns = ("名称", "状态", "绑定地址", "本地端口", "远程地址", "PID")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
 
         for col in columns:
@@ -150,10 +150,12 @@ class TunnelGUI:
                 self.tree.column(col, width=120)
             elif col == "状态":
                 self.tree.column(col, width=80)
+            elif col == "绑定地址":
+                self.tree.column(col, width=100)
             elif col == "本地端口":
                 self.tree.column(col, width=80)
             elif col == "远程地址":
-                self.tree.column(col, width=300)
+                self.tree.column(col, width=260)
             elif col == "PID":
                 self.tree.column(col, width=80)
 
@@ -255,7 +257,8 @@ class TunnelGUI:
                     tag = "stopped"
                     pid = "-"
 
-                item_id = self.tree.insert("", tk.END, values=(name, status, local_port, remote_addr, pid))
+                local_bind = tunnel.get('local_bind', '127.0.0.1')
+                item_id = self.tree.insert("", tk.END, values=(name, status, local_bind, local_port, remote_addr, pid))
                 self.tree.tag_configure("running", foreground="green")
                 self.tree.tag_configure("stopped", foreground="red")
                 self.tree.tag_configure("starting", foreground="orange")
@@ -581,41 +584,51 @@ class TunnelGUI:
             if dialog.result:
                 # 检查隧道是否正在运行
                 was_running = (status == "运行中")
-                old_name = name
+                old_pid = tunnel.get('pid')
+
+                # 保留原有字段（pid、auto_start 等），用新配置覆盖编辑字段
+                new_tunnel = dict(tunnel)
+                new_tunnel.update(dialog.result)
+                new_tunnel['pid'] = None  # 停止后先清空 pid
 
                 # 如果隧道正在运行，先停止它
-                if was_running:
-                    self.log(f"隧道 {old_name} 正在运行，先停止...")
-                    pid = tunnel.get('pid')
-                    if pid:
-                        try:
-                            import psutil
-                            process = psutil.Process(pid)
-                            if process.is_running():
-                                process.terminate()
+                if was_running and old_pid:
+                    self.log(f"隧道 {name} 正在运行，先停止...")
+                    try:
+                        import psutil
+                        process = psutil.Process(old_pid)
+                        if process.is_running():
+                            process.terminate()
+                            try:
                                 process.wait(timeout=3)
-                                self.log(f"隧道 {old_name} 已关闭")
-                            self.manager.clear_tunnel_pid(old_name)
-                        except Exception as e:
-                            self.log(f"停止隧道失败: {e}")
+                            except psutil.TimeoutExpired:
+                                process.kill()
+                            self.log(f"隧道 {name} 已关闭")
+                    except Exception as e:
+                        self.log(f"停止隧道失败: {e}")
 
                 # 更新隧道配置
                 idx = self.manager.tunnels.index(tunnel)
-                self.manager.tunnels[idx] = dialog.result
+                self.manager.tunnels[idx] = new_tunnel
                 self.manager.save_config()
-                self.log(f"已更新隧道配置: {dialog.result['name']}")
-
-                # 如果之前在运行，重新启动
-                if was_running:
-                    self.log(f"正在重启隧道: {dialog.result['name']}")
-                    process = self.manager.start_tunnel(dialog.result)
-                    if process:
-                        self.manager.update_tunnel_pid(dialog.result['name'], process.pid)
-                        self.log(f"隧道 {dialog.result['name']} 已重启 (PID: {process.pid})")
-                    else:
-                        self.log(f"隧道 {dialog.result['name']} 重启失败")
-
+                self.log(f"已更新隧道配置: {new_tunnel['name']}")
                 self.refresh_status()
+
+                # 如果之前在运行，在子线程中重新启动
+                if was_running:
+                    self._restarting_tunnels.add(new_tunnel['name'])
+                    self.refresh_status()
+                    def restart_after_edit(t):
+                        self.log(f"正在重启隧道: {t['name']}")
+                        proc = self.manager.start_tunnel(t)
+                        self._restarting_tunnels.discard(t['name'])
+                        if proc:
+                            self.manager.update_tunnel_pid(t['name'], proc.pid)
+                            self.log(f"隧道 {t['name']} 已重启 (PID: {proc.pid})")
+                        else:
+                            self.log(f"隧道 {t['name']} 重启失败")
+                        self.root.after(0, self.refresh_status)
+                    threading.Thread(target=restart_after_edit, args=(new_tunnel,), daemon=True).start()
 
     def delete_tunnel(self):
         """删除选中的隧道"""
@@ -1157,7 +1170,7 @@ class TunnelEditDialog:
         self.result = None
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
-        self.dialog.geometry("500x400")
+        self.dialog.geometry("500x450")
         self.dialog.resizable(False, False)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -1184,27 +1197,33 @@ class TunnelEditDialog:
         ssh_port_entry = PlaceholderEntry(frame, textvariable=self.ssh_port_var, placeholder="默认: 22", width=40)
         ssh_port_entry.grid(row=2, column=1, pady=5)
 
+        # 本地绑定地址
+        ttk.Label(frame, text="本地绑定地址:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.local_bind_var = tk.StringVar(value=tunnel.get('local_bind', '127.0.0.1') if tunnel else '127.0.0.1')
+        local_bind_combo = ttk.Combobox(frame, textvariable=self.local_bind_var, values=['127.0.0.1', '0.0.0.0'], width=38)
+        local_bind_combo.grid(row=3, column=1, pady=5)
+
         # 本地端口
-        ttk.Label(frame, text="本地端口:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="本地端口:").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.local_port_var = tk.StringVar(value=str(tunnel.get('local_port', '')) if tunnel else '')
         local_port_entry = PlaceholderEntry(frame, textvariable=self.local_port_var, placeholder="你电脑上监听的端口，例如: 13306", width=40)
-        local_port_entry.grid(row=3, column=1, pady=5)
+        local_port_entry.grid(row=4, column=1, pady=5)
 
         # 远程主机
-        ttk.Label(frame, text="远程主机:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="远程主机:").grid(row=5, column=0, sticky=tk.W, pady=5)
         self.remote_host_var = tk.StringVar(value=tunnel.get('remote_host', '127.0.0.1') if tunnel else '127.0.0.1')
         remote_host_entry = PlaceholderEntry(frame, textvariable=self.remote_host_var, placeholder="默认: 127.0.0.1", width=40)
-        remote_host_entry.grid(row=4, column=1, pady=5)
+        remote_host_entry.grid(row=5, column=1, pady=5)
 
         # 远程端口
-        ttk.Label(frame, text="远程端口:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="远程端口:").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.remote_port_var = tk.StringVar(value=str(tunnel.get('remote_port', '')) if tunnel else '')
         remote_port_entry = PlaceholderEntry(frame, textvariable=self.remote_port_var, placeholder="目标服务的端口，例如: 3306", width=40)
-        remote_port_entry.grid(row=5, column=1, pady=5)
+        remote_port_entry.grid(row=6, column=1, pady=5)
 
         # 按钮
         button_frame = ttk.Frame(frame)
-        button_frame.grid(row=6, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=7, column=0, columnspan=2, pady=20)
         ttk.Button(button_frame, text="确定", command=self.ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.cancel).pack(side=tk.LEFT, padx=5)
 
@@ -1244,10 +1263,13 @@ class TunnelEditDialog:
             return
 
         # 构建结果
+        local_bind = self.local_bind_var.get().strip() or '127.0.0.1'
+
         self.result = {
             'name': self.name_var.get().strip(),
             'ssh_host': self.ssh_host_var.get().strip(),
             'ssh_port': ssh_port,
+            'local_bind': local_bind,
             'local_port': local_port,
             'remote_host': self.remote_host_var.get().strip(),
             'remote_port': remote_port,
