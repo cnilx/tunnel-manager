@@ -1083,7 +1083,9 @@ class TunnelGUI:
                                     self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
                                     self.root.after(0, self.refresh_status)
                                 else:
+                                    self.manager.clear_tunnel_pid(name)
                                     self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
+                                    self.root.after(0, self.refresh_status)
                             elif port_reachable is False:
                                 # 进程存活但端口不通,重连
                                 self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 不通，正在重连..."))
@@ -1107,7 +1109,12 @@ class TunnelGUI:
                                         self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重连 (PID: {p})"))
                                         self.root.after(0, self.refresh_status)
                                     else:
+                                        self.manager.clear_tunnel_pid(name)
                                         self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重连失败"))
+                                        self.root.after(0, self.refresh_status)
+                                else:
+                                    self.manager.clear_tunnel_pid(name)
+                                    self.root.after(0, self.refresh_status)
                         except psutil.NoSuchProcess:
                             # 进程不存在,尝试重启
                             self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
@@ -1117,7 +1124,9 @@ class TunnelGUI:
                                 self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重启 (PID: {p})"))
                                 self.root.after(0, self.refresh_status)
                             else:
+                                self.manager.clear_tunnel_pid(name)
                                 self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
+                                self.root.after(0, self.refresh_status)
                         except Exception as e:
                             self.root.after(0, lambda n=name, err=e: self.log(f"监控隧道 {n} 时出错: {err}"))
 
