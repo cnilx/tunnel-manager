@@ -51,6 +51,42 @@ python source/tunnel_gui.py
     └── tunnels.yaml
 ```
 
+## 配置说明
+
+### tunnels.yaml 字段
+
+| 字段 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | 是 | - | 隧道名称（唯一标识） |
+| `ssh_host` | 是 | - | SSH 服务器地址，格式 `user@host` |
+| `ssh_port` | 否 | `22` | SSH 端口 |
+| `local_bind` | 否 | `127.0.0.1` | 本地绑定地址（见下方说明） |
+| `local_port` | 是 | - | 本地监听端口 |
+| `remote_host` | 否 | `127.0.0.1` | 远程目标主机 |
+| `remote_port` | 是 | - | 远程目标端口 |
+| `auto_start` | 否 | `false` | 程序启动时自动建立隧道 |
+
+### 局域网共享（local_bind）
+
+默认情况下隧道只绑定本机 `127.0.0.1`，仅本机可访问。
+
+若需要让**同一局域网内的其他人**也能访问，将 `local_bind` 设为 `0.0.0.0`：
+
+```yaml
+tunnels:
+- name: mysql
+  ssh_host: user@server
+  ssh_port: 22
+  local_bind: 0.0.0.0   # 局域网内所有人可访问
+  local_port: 3306
+  remote_host: 127.0.0.1
+  remote_port: 3306
+  auto_start: false
+  pid: null
+```
+
+> 也可在 GUI 的添加/编辑隧道对话框中通过下拉框选择绑定地址，无需手动编辑 YAML。
+
 ## 开发
 
 ### 打包可执行文件
