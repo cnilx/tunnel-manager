@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+import socket
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
@@ -1045,7 +1046,7 @@ class TunnelGUI:
         self.log("已关闭自动重启监控")
 
     def monitor_tunnels(self):
-        """监控隧道进程,自动重启死掉的进程"""
+        """监控隧道进程,自动重启死掉的进程或不通的隧道"""
         while self.monitoring:
             try:
                 self.manager.load_config()
@@ -1056,6 +1057,19 @@ class TunnelGUI:
 
                     if not pid:
                         continue
+
+                    # 在锁外做连通性探测（纯读操作，避免持锁时间过长）
+                    local_port = tunnel.get('local_port')
+                    port_reachable = None  # None 表示跳过探测
+                    if isinstance(local_port, int) and 1 <= local_port <= 65535:
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(1.5)
+                            result = sock.connect_ex(('127.0.0.1', local_port))
+                            sock.close()
+                            port_reachable = (result == 0)
+                        except Exception:
+                            port_reachable = False
 
                     with self._tunnel_lock:
                         try:
@@ -1071,6 +1085,27 @@ class TunnelGUI:
                                     self.root.after(0, self.refresh_status)
                                 else:
                                     self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重启失败"))
+                            elif port_reachable is False:
+                                # 进程存活但端口不通,重连
+                                self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 不通，正在重连..."))
+                                try:
+                                    process.terminate()
+                                    try:
+                                        process.wait(timeout=3)
+                                    except psutil.TimeoutExpired:
+                                        try:
+                                            process.kill()
+                                        except Exception as kill_err:
+                                            self.root.after(0, lambda n=name, err=kill_err: self.log(f"隧道 {n} 强制终止失败: {err}"))
+                                except Exception:
+                                    pass
+                                new_process = self.manager.start_tunnel(tunnel)
+                                if new_process:
+                                    self.manager.update_tunnel_pid(name, new_process.pid)
+                                    self.root.after(0, lambda n=name, p=new_process.pid: self.log(f"隧道 {n} 已重连 (PID: {p})"))
+                                    self.root.after(0, self.refresh_status)
+                                else:
+                                    self.root.after(0, lambda n=name: self.log(f"隧道 {n} 重连失败"))
                         except psutil.NoSuchProcess:
                             # 进程不存在,尝试重启
                             self.root.after(0, lambda n=name: self.log(f"检测到隧道 {n} 进程不存在,正在重启..."))
