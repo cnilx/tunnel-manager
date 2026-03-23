@@ -1,14 +1,17 @@
-# SSH 隧道管理器
+# SSH 隧道管理器 1.0.3
 
-带 GUI 界面的 SSH 隧道管理工具，支持批量管理、状态监控和自动重启。
+带 GUI 界面的 SSH 隧道管理工具，支持批量管理、标签筛选、端口校验、状态监控和自动重启。
 
 ## 功能特点
 
 - 图形化界面，操作简单
 - 批量管理多个 SSH 隧道
+- 标签筛选和批量启动/停止
+- 启动前端口冲突与端口占用校验
 - 实时状态监控
 - 自动重启死掉的进程
 - 系统托盘运行
+- 默认关闭到托盘
 - 操作日志记录
 
 ## 快速开始
@@ -35,6 +38,8 @@ pip install -r requirements.txt
 python source/tunnel_gui.py
 ```
 
+首次启动时如果本地没有配置文件，程序会自动创建空的 `tunnels.yaml`。
+
 ## 项目结构
 
 ```
@@ -45,7 +50,7 @@ python source/tunnel_gui.py
 ├── source/                # 源代码
 │   ├── tunnel.py          # 核心管理模块
 │   ├── tunnel_gui.py      # GUI 界面
-│   └── tunnels.yaml       # 配置文件示例
+│   └── tunnels.yaml       # 本地运行时自动生成的配置文件（不提交）
 └── release/               # 发布版本
     ├── SSHTunnelManager.exe
     └── tunnels.yaml
@@ -64,7 +69,10 @@ python source/tunnel_gui.py
 | `local_port` | 是 | - | 本地监听端口 |
 | `remote_host` | 否 | `127.0.0.1` | 远程目标主机 |
 | `remote_port` | 是 | - | 远程目标端口 |
-| `auto_start` | 否 | `false` | 程序启动时自动建立隧道 |
+| `tags` | 否 | `[]` | 标签列表，用于 GUI 中的快速筛选，例如 `["生产", "MySQL"]` |
+| `auto_start` | 否 | `false` | 程序启动时自动建立隧道；程序完整退出前会记住当前仍在运行的隧道，并在下次启动时自动恢复 |
+
+> `auto_start` 在 GUI 模式下既可手工配置，也会在程序完整退出前被更新为当前仍在运行的隧道集合，用于下次启动自动恢复。
 
 ### 局域网共享（local_bind）
 
@@ -81,22 +89,55 @@ tunnels:
   local_port: 3306
   remote_host: 127.0.0.1
   remote_port: 3306
+  tags:
+    - 数据库
+    - 局域网共享
   auto_start: false
   pid: null
 ```
 
-> 也可在 GUI 的添加/编辑隧道对话框中通过下拉框选择绑定地址，无需手动编辑 YAML。
+> 也可在 GUI 的添加/编辑隧道对话框中直接填写标签，并通过顶部“标签筛选”下拉框快速查看同一类隧道，无需手动编辑 YAML。
+
+### 配置文件位置
+
+- 源码运行时默认使用 `source/tunnels.yaml`
+- 发布版运行时默认使用 `release/tunnels.yaml`
+- 如果文件不存在，程序会自动创建一个空配置：
+
+```yaml
+tunnels: []
+```
+
+### 端口校验规则
+
+- 添加/编辑隧道时，会拦截与现有隧道配置冲突的本地监听端口
+- 启动隧道时，会额外检查本机端口是否已被其他进程占用
+- 端口冲突或占用时，GUI 会弹窗提示具体原因
+
+### GUI 交互说明
+
+- 点击窗口右上角关闭按钮时，程序默认最小化到系统托盘，隧道继续运行
+- 如需完整退出，请使用托盘菜单中的“退出”
+- 表格支持多选，`Delete` 键可批量删除选中的隧道
+- 右键菜单提供“浏览器中打开”，会使用默认浏览器访问本地端口地址
+- 表格顶部“启动所有隧道 / 停止所有隧道”会按当前标签筛选结果生效
 
 ## 开发
 
 ### 打包可执行文件
 
 ```bash
-# 双击运行
+# Windows 下双击运行
 build.bat
 ```
 
 生成的可执行文件位于 `release/SSHTunnelManager.exe`
+
+### 版本发布
+
+- 当前版本号定义在 `source/tunnel_gui.py` 的 `APP_VERSION`
+- 发布新版本时，先更新 `APP_VERSION` 与 `CHANGELOG.md`
+- 然后手动执行 `build.bat` 生成新的 `release/SSHTunnelManager.exe`
 
 ## 依赖
 
