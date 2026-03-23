@@ -45,6 +45,7 @@ htmlcov/
 # 数据文件
 /data/
 workspaces/
+source/tunnels.yaml
 
 # Docker
 .dockerignore
@@ -56,3 +57,5 @@ workspaces/
 
 /workspace
 /.claude
+
+AGENTS.md
