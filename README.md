@@ -122,6 +122,49 @@ tunnels: []
 - 右键菜单提供“浏览器中打开”，会使用默认浏览器访问本地端口地址
 - 表格顶部“启动所有隧道 / 停止所有隧道”会按当前标签筛选结果生效
 
+## SSH 公钥配置（免密登录）
+
+使用 SSH 隧道配置公钥认证，避免输入密码。
+
+### 第一步：生成密钥对
+
+```bash
+# Windows（PowerShell 或 Git Bash）
+ssh-keygen -t ed25519 -C "your_email@example.com"
+```
+
+按提示操作：
+- 密钥保存路径：直接回车使用默认路径 `~/.ssh/id_ed25519`
+- 密码短语：建议留空（直接回车），方便自动化连接
+
+生成后会得到两个文件：
+- `~/.ssh/id_ed25519` — 私钥（**不要泄露**）
+- `~/.ssh/id_ed25519.pub` — 公钥（上传到服务器）
+
+### 第二步：将公钥上传到服务器
+
+**手动追加（适用于 PowerShell）**
+
+```powershell
+# 查看公钥内容
+Get-Content ~/.ssh/id_ed25519.pub
+
+# 将公钥追加到服务器的 authorized_keys
+$pubkey = Get-Content ~/.ssh/id_ed25519.pub
+ssh user@your-server "mkdir -p ~/.ssh && echo '$pubkey' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+### 第三步：验证免密登录
+
+```bash
+ssh -p 22 user@your-server
+# 若不再提示输入密码，则配置成功
+```
+
+配置成功后，SSH 隧道管理器即可无需手动干预地自动建立和恢复隧道连接。
+
+---
+
 ## 开发
 
 ### 打包可执行文件
