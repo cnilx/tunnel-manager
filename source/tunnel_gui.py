@@ -28,9 +28,10 @@ from tunnel import TunnelManager
 
 ALL_TAG_FILTER = "全部标签"
 UNTAGGED_FILTER = "未设置标签"
+ALL_TYPE_FILTER = "全部类型"
 STOP_LIKE_STATUSES = {"运行中", "重启中", "启动中"}
 APP_NAME = "SSH 隧道管理器"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 APP_TITLE = f"{APP_NAME} {APP_VERSION}"
 
 
@@ -138,6 +139,7 @@ class TunnelGUI:
         self.is_minimized = False  # 是否已最小化到后台
         self.tray_icon = None  # 系统托盘图标
         self.tag_filter_var = tk.StringVar(value=ALL_TAG_FILTER)
+        self.type_filter_var = tk.StringVar(value=ALL_TYPE_FILTER)
         self._hovered_action = None
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
@@ -183,6 +185,17 @@ class TunnelGUI:
         )
         self.tag_filter_combo.pack(side=tk.LEFT, padx=5)
         self.tag_filter_combo.bind("<<ComboboxSelected>>", self.on_tag_filter_changed)
+
+        ttk.Label(toolbar, text="类型筛选").pack(side=tk.LEFT, padx=(10, 5))
+        self.type_filter_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.type_filter_var,
+            state="readonly",
+            width=10,
+            values=[ALL_TYPE_FILTER, "本地转发", "反向转发"]
+        )
+        self.type_filter_combo.pack(side=tk.LEFT, padx=5)
+        self.type_filter_combo.bind("<<ComboboxSelected>>", self.on_type_filter_changed)
 
         # 主内容区域
         main_frame = ttk.Frame(self.root, padding=(10, 6, 10, 0))
@@ -408,6 +421,9 @@ class TunnelGUI:
 
     def _validate_tunnel_config_ports(self, tunnel_data, exclude_tunnel=None):
         """校验隧道配置中的本地监听端口是否与现有配置冲突。"""
+        # 反向隧道监听在远端服务器，跳过本地端口冲突检测
+        if tunnel_data.get('tunnel_type', 'local') == 'remote':
+            return True, None
         conflict_tunnel = self.manager.find_local_port_conflict(tunnel_data, exclude_tunnel=exclude_tunnel)
         if conflict_tunnel:
             return False, self.manager.format_local_port_conflict_message(tunnel_data, conflict_tunnel)
@@ -472,6 +488,20 @@ class TunnelGUI:
     def on_tag_filter_changed(self, event=None):
         """切换标签筛选时刷新列表。"""
         self.refresh_status(emit_log=False)
+
+    def on_type_filter_changed(self, event=None):
+        """切换类型筛选时刷新列表。"""
+        self.refresh_status(emit_log=False)
+
+    def _matches_type_filter(self, tunnel):
+        """判断隧道是否匹配当前类型筛选。"""
+        selected = self.type_filter_var.get() or ALL_TYPE_FILTER
+        if selected == ALL_TYPE_FILTER:
+            return True
+        tunnel_type = tunnel.get('tunnel_type', 'local')
+        if selected == "反向转发":
+            return tunnel_type == 'remote'
+        return tunnel_type == 'local'
 
     def _get_tunnel_by_item_id(self, item_id):
         """根据 Treeview 行 id 获取当前配置中的隧道。"""
@@ -648,8 +678,13 @@ class TunnelGUI:
                 for index, tunnel in enumerate(self.manager.tunnels):
                     if not self._matches_tag_filter(tunnel, selected_filter):
                         continue
+                    if not self._matches_type_filter(tunnel):
+                        continue
 
                     name = tunnel.get('name', '未命名')
+                    tunnel_type = tunnel.get('tunnel_type', 'local')
+                    type_tag = '[R]' if tunnel_type == 'remote' else '[L]'
+                    display_name = f"{type_tag} {name}"
                     local_port = tunnel.get('local_port')
                     remote_host = self.manager.get_tunnel_remote_host(tunnel)
                     remote_port = tunnel.get('remote_port')
@@ -681,7 +716,7 @@ class TunnelGUI:
                         (
                             str(index),
                             (
-                                name,
+                                display_name,
                                 status,
                                 tags_display,
                                 local_bind,
@@ -728,6 +763,8 @@ class TunnelGUI:
 
                         for index, tunnel in enumerate(self.manager.tunnels):
                             if not self._matches_tag_filter(tunnel, current_filter):
+                                continue
+                            if not self._matches_type_filter(tunnel):
                                 continue
 
                             matched_count += 1
@@ -840,6 +877,8 @@ class TunnelGUI:
 
                     for index, tunnel in enumerate(self.manager.tunnels):
                         if not self._matches_tag_filter(tunnel, current_filter):
+                            continue
+                        if not self._matches_type_filter(tunnel):
                             continue
 
                         matched_count += 1
@@ -1646,9 +1685,10 @@ class TunnelGUI:
                         continue
 
                     # 在锁外做连通性探测（纯读操作，避免持锁时间过长）
+                    # 反向隧道监听在远端服务器，无法从本机 TCP 探测，直接跳过
                     local_port = tunnel.get('local_port')
                     port_reachable = None  # None 表示跳过探测
-                    if isinstance(local_port, int) and 1 <= local_port <= 65535:
+                    if tunnel.get('tunnel_type', 'local') != 'remote' and isinstance(local_port, int) and 1 <= local_port <= 65535:
                         try:
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                                 sock.settimeout(1.5)
@@ -1727,8 +1767,8 @@ class TunnelEditDialog:
         self.existing_tags = existing_tags or []
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
-        self.dialog.geometry("620x520")
-        self.dialog.minsize(620, 520)
+        self.dialog.geometry("620x580")
+        self.dialog.minsize(620, 580)
         self.dialog.resizable(False, False)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -1741,7 +1781,7 @@ class TunnelEditDialog:
         # 名称
         ttk.Label(frame, text="名称:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.name_var = tk.StringVar(value=tunnel.get('name', '') if tunnel else '')
-        name_entry = PlaceholderEntry(frame, textvariable=self.name_var, placeholder="例如: 生产环境MySQL", width=52)
+        name_entry = PlaceholderEntry(frame, textvariable=self.name_var, placeholder="", width=52)
         name_entry.grid(row=0, column=1, sticky=tk.EW, pady=8)
 
         # SSH主机
@@ -1758,35 +1798,61 @@ class TunnelEditDialog:
         # SSH端口
         ttk.Label(frame, text="SSH端口:").grid(row=2, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.ssh_port_var = tk.StringVar(value=str(tunnel.get('ssh_port', 22)) if tunnel else '22')
-        ssh_port_entry = PlaceholderEntry(frame, textvariable=self.ssh_port_var, placeholder="默认: 22", width=52)
+        ssh_port_entry = PlaceholderEntry(frame, textvariable=self.ssh_port_var, placeholder="", width=52)
         ssh_port_entry.grid(row=2, column=1, sticky=tk.EW, pady=8)
 
+        # 隧道类型
+        self.tunnel_type_var = tk.StringVar(value=(tunnel.get('tunnel_type', 'local') if tunnel else 'local'))
+        type_frame = ttk.Frame(frame)
+        type_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(8, 2))
+        ttk.Label(type_frame, text="隧道类型:").pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Radiobutton(
+            type_frame, text="本地转发 -L（将远端服务映射到本机）",
+            variable=self.tunnel_type_var, value='local',
+            command=self._on_type_changed
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Radiobutton(
+            type_frame, text="反向转发 -R（将本机服务暴露到远端）",
+            variable=self.tunnel_type_var, value='remote',
+            command=self._on_type_changed
+        ).pack(side=tk.LEFT)
+
+        # 流量流向提示
+        self._type_hint_var = tk.StringVar()
+        ttk.Label(frame, textvariable=self._type_hint_var, foreground="gray").grid(
+            row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 4)
+        )
+
         # 本地绑定地址
-        ttk.Label(frame, text="本地绑定地址:").grid(row=3, column=0, sticky=tk.W, pady=8, padx=(0, 12))
+        self.local_bind_label = ttk.Label(frame, text="本地绑定地址:")
+        self.local_bind_label.grid(row=5, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.local_bind_var = tk.StringVar(value=tunnel.get('local_bind', '127.0.0.1') if tunnel else '127.0.0.1')
-        local_bind_combo = ttk.Combobox(frame, textvariable=self.local_bind_var, values=['127.0.0.1', '0.0.0.0'], width=50)
-        local_bind_combo.grid(row=3, column=1, sticky=tk.EW, pady=8)
+        self.local_bind_combo = ttk.Combobox(frame, textvariable=self.local_bind_var, values=['127.0.0.1', '0.0.0.0'], width=50)
+        self.local_bind_combo.grid(row=5, column=1, sticky=tk.EW, pady=8)
 
         # 本地端口
-        ttk.Label(frame, text="本地端口:").grid(row=4, column=0, sticky=tk.W, pady=8, padx=(0, 12))
+        self.local_port_label = ttk.Label(frame, text="本地端口:")
+        self.local_port_label.grid(row=6, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.local_port_var = tk.StringVar(value=str(tunnel.get('local_port', '')) if tunnel else '')
-        local_port_entry = PlaceholderEntry(frame, textvariable=self.local_port_var, placeholder="你电脑上监听的端口，例如: 13306", width=52)
-        local_port_entry.grid(row=4, column=1, sticky=tk.EW, pady=8)
+        self.local_port_entry = PlaceholderEntry(frame, textvariable=self.local_port_var, placeholder="", width=52)
+        self.local_port_entry.grid(row=6, column=1, sticky=tk.EW, pady=8)
 
         # 远程主机
-        ttk.Label(frame, text="远程主机:").grid(row=5, column=0, sticky=tk.W, pady=8, padx=(0, 12))
+        self.remote_host_label = ttk.Label(frame, text="远端服务地址:")
+        self.remote_host_label.grid(row=7, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.remote_host_var = tk.StringVar(value=(tunnel.get('remote_host') or '127.0.0.1') if tunnel else '127.0.0.1')
-        remote_host_entry = PlaceholderEntry(frame, textvariable=self.remote_host_var, placeholder="默认: 127.0.0.1", width=52)
-        remote_host_entry.grid(row=5, column=1, sticky=tk.EW, pady=8)
+        self.remote_host_combo = ttk.Combobox(frame, textvariable=self.remote_host_var, values=['127.0.0.1'], width=50)
+        self.remote_host_combo.grid(row=7, column=1, sticky=tk.EW, pady=8)
 
         # 远程端口
-        ttk.Label(frame, text="远程端口:").grid(row=6, column=0, sticky=tk.W, pady=8, padx=(0, 12))
+        self.remote_port_label = ttk.Label(frame, text="远端服务端口:")
+        self.remote_port_label.grid(row=8, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.remote_port_var = tk.StringVar(value=str(tunnel.get('remote_port', '')) if tunnel else '')
-        remote_port_entry = PlaceholderEntry(frame, textvariable=self.remote_port_var, placeholder="目标服务的端口，例如: 3306", width=52)
-        remote_port_entry.grid(row=6, column=1, sticky=tk.EW, pady=8)
+        remote_port_entry = PlaceholderEntry(frame, textvariable=self.remote_port_var, placeholder="", width=52)
+        remote_port_entry.grid(row=8, column=1, sticky=tk.EW, pady=8)
 
         # 标签
-        ttk.Label(frame, text="标签:").grid(row=7, column=0, sticky=tk.W, pady=8, padx=(0, 12))
+        ttk.Label(frame, text="标签:").grid(row=9, column=0, sticky=tk.W, pady=8, padx=(0, 12))
         self.tags_var = tk.StringVar(value=', '.join(normalize_tags(tunnel.get('tags', []))) if tunnel else '')
         self.tags_combo = ttk.Combobox(
             frame,
@@ -1794,19 +1860,22 @@ class TunnelEditDialog:
             values=self.existing_tags,
             width=50
         )
-        self.tags_combo.grid(row=7, column=1, sticky=tk.EW, pady=8)
+        self.tags_combo.grid(row=9, column=1, sticky=tk.EW, pady=8)
         self.tags_combo.bind("<<ComboboxSelected>>", self.on_tag_selected)
         ttk.Label(
             frame,
             text="可直接输入；也可从下拉选择已有标签，多个标签用逗号分隔",
             foreground="gray"
-        ).grid(row=8, column=1, sticky=tk.W)
+        ).grid(row=10, column=1, sticky=tk.W)
 
         # 按钮
         button_frame = ttk.Frame(frame)
-        button_frame.grid(row=9, column=0, columnspan=2, pady=24)
+        button_frame.grid(row=11, column=0, columnspan=2, pady=24)
         ttk.Button(button_frame, text="确定", command=self.ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.cancel).pack(side=tk.LEFT, padx=5)
+
+        # 根据初始类型初始化标签
+        self._on_type_changed()
 
         # 居中显示
         self.dialog.update_idletasks()
@@ -1815,6 +1884,38 @@ class TunnelEditDialog:
         self.dialog.geometry(f"+{x}+{y}")
 
         self.dialog.wait_window()
+
+    def _on_type_changed(self):
+        """切换隧道类型时更新表单标签和下拉候选。"""
+        t = self.tunnel_type_var.get()
+        if t == 'remote':
+            # 反向转发：本机提供服务，服务器暴露端口
+            self.local_bind_label.config(text="本机服务地址:")
+            self.local_port_label.config(text="本机服务端口:")
+            self.remote_host_label.config(text="远端监听地址:")
+            self.remote_port_label.config(text="远端监听端口:")
+            self.local_port_entry.placeholder = ""
+            self.local_bind_combo.config(values=['127.0.0.1'])
+            if self.local_bind_var.get().strip() == '0.0.0.0':
+                self.local_bind_var.set('127.0.0.1')
+            self.remote_host_combo.config(values=['0.0.0.0', '127.0.0.1'])
+            if not self.remote_host_var.get().strip():
+                self.remote_host_var.set('0.0.0.0')
+            self._type_hint_var.set(
+                "访问 远端IP:远端监听端口 → 流量转发到 本机服务地址:本机服务端口"
+            )
+        else:
+            # 本地转发：本机开端口，访问远端服务
+            self.local_bind_label.config(text="本机监听地址:")
+            self.local_port_label.config(text="本机监听端口:")
+            self.remote_host_label.config(text="远端服务地址:")
+            self.remote_port_label.config(text="远端服务端口:")
+            self.local_port_entry.placeholder = ""
+            self.local_bind_combo.config(values=['127.0.0.1', '0.0.0.0'])
+            self.remote_host_combo.config(values=['127.0.0.1'])
+            self._type_hint_var.set(
+                "访问 本机监听地址:本机监听端口 → 流量转发到 远端服务地址:远端服务端口"
+            )
 
     def on_tag_selected(self, event=None):
         """从下拉选择已有标签时追加到当前标签列表。"""
@@ -1857,8 +1958,13 @@ class TunnelEditDialog:
             return
 
         # 构建结果
+        tunnel_type = self.tunnel_type_var.get()
         local_bind = self.local_bind_var.get().strip() or '127.0.0.1'
-        remote_host = self.remote_host_var.get().strip() or '127.0.0.1'
+        if tunnel_type == 'remote' and local_bind == '0.0.0.0':
+            messagebox.showerror("错误", "反向隧道的本机服务地址不能为 0.0.0.0，请填写具体地址（如 127.0.0.1）")
+            return
+        remote_host_default = '0.0.0.0' if tunnel_type == 'remote' else '127.0.0.1'
+        remote_host = self.remote_host_var.get().strip() or remote_host_default
         tags = normalize_tags(self.tags_var.get())
 
         self.result = {
@@ -1870,6 +1976,7 @@ class TunnelEditDialog:
             'remote_host': remote_host,
             'remote_port': remote_port,
             'tags': tags,
+            'tunnel_type': tunnel_type,
         }
 
         self.dialog.destroy()

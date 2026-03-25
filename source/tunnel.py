@@ -74,6 +74,8 @@ class TunnelManager:
                 for tunnel in self.tunnels:
                     if 'pid' not in tunnel:
                         tunnel['pid'] = None
+                    if 'tunnel_type' not in tunnel:
+                        tunnel['tunnel_type'] = 'local'
 
             return self.tunnels
 
@@ -106,6 +108,7 @@ class TunnelManager:
             tunnel.get('remote_host') or '127.0.0.1',
             tunnel.get('remote_port'),
             (tunnel.get('extra_args') or '').strip(),
+            tunnel.get('tunnel_type', 'local'),
         )
 
     def _find_tunnel_unlocked(self, tunnel_ref):
@@ -148,7 +151,9 @@ class TunnelManager:
 
     def get_tunnel_remote_host(self, tunnel):
         """获取远程目标主机，空值回退到默认地址。"""
-        return tunnel.get('remote_host') or '127.0.0.1'
+        tunnel_type = tunnel.get('tunnel_type', 'local')
+        default = '0.0.0.0' if tunnel_type == 'remote' else '127.0.0.1'
+        return tunnel.get('remote_host') or default
 
     def get_tunnel_local_endpoint(self, tunnel):
         """返回本地监听端点。"""
@@ -167,6 +172,12 @@ class TunnelManager:
 
     def tunnels_conflict_on_local_port(self, tunnel_a, tunnel_b):
         """判断两条隧道配置是否存在本地监听端口冲突。"""
+        # 反向隧道不在本机监听，不参与本地端口冲突检测
+        if tunnel_a.get('tunnel_type', 'local') == 'remote':
+            return False
+        if tunnel_b.get('tunnel_type', 'local') == 'remote':
+            return False
+
         local_bind_a, local_port_a = self.get_tunnel_local_endpoint(tunnel_a)
         local_bind_b, local_port_b = self.get_tunnel_local_endpoint(tunnel_b)
 
@@ -223,6 +234,10 @@ class TunnelManager:
 
     def validate_tunnel_ports(self, tunnel, exclude_tunnel=None):
         """校验本地监听端口配置与当前主机端口占用情况。"""
+        # 反向隧道监听在远端服务器，无法在本机校验端口
+        if tunnel.get('tunnel_type', 'local') == 'remote':
+            return True, None
+
         conflict_tunnel = self.find_local_port_conflict(tunnel, exclude_tunnel=exclude_tunnel)
         if conflict_tunnel:
             return False, self.format_local_port_conflict_message(tunnel, conflict_tunnel)
@@ -234,18 +249,29 @@ class TunnelManager:
         return True, None
 
     def get_tunnel_forward_spec(self, tunnel):
-        """获取 ssh -L 所需的转发参数。"""
+        """获取 ssh -L/-R 所需的转发参数。"""
         local_port = tunnel.get('local_port')
         remote_port = tunnel.get('remote_port')
         if not local_port or not remote_port:
             return None
 
-        return (
-            f"{self.get_tunnel_local_bind(tunnel)}:"
-            f"{local_port}:"
-            f"{self.get_tunnel_remote_host(tunnel)}:"
-            f"{remote_port}"
-        )
+        tunnel_type = tunnel.get('tunnel_type', 'local')
+        if tunnel_type == 'remote':
+            # -R remote_host:remote_port:local_bind:local_port
+            return (
+                f"{self.get_tunnel_remote_host(tunnel)}:"
+                f"{remote_port}:"
+                f"{self.get_tunnel_local_bind(tunnel)}:"
+                f"{local_port}"
+            )
+        else:
+            # -L local_bind:local_port:remote_host:remote_port
+            return (
+                f"{self.get_tunnel_local_bind(tunnel)}:"
+                f"{local_port}:"
+                f"{self.get_tunnel_remote_host(tunnel)}:"
+                f"{remote_port}"
+            )
 
     def _cmdline_has_option_value(self, cmdline, option, expected_value):
         expected_value = str(expected_value)
@@ -283,7 +309,9 @@ class TunnelManager:
         if not self._cmdline_has_option_value(cmdline, '-p', ssh_port):
             return False
 
-        if not self._cmdline_has_option_value(cmdline, '-L', forward_spec):
+        tunnel_type = tunnel.get('tunnel_type', 'local')
+        flag = '-R' if tunnel_type == 'remote' else '-L'
+        if not self._cmdline_has_option_value(cmdline, flag, forward_spec):
             return False
 
         return True
@@ -427,9 +455,15 @@ class TunnelManager:
             print(f"❌ 隧道 '{name}' 缺少端口参数")
             return None
 
-        # 构建端口转发参数（仅支持本地转发 -L）
+        # 构建端口转发参数
         local_bind = self.get_tunnel_local_bind(tunnel)
-        forward_arg = f"-L {local_bind}:{local_port}:{remote_host}:{remote_port}"
+        tunnel_type = tunnel.get('tunnel_type', 'local')
+        if tunnel_type == 'remote':
+            # 反向隧道：-R remote_host:remote_port:local_bind:local_port
+            forward_arg = f"-R {remote_host}:{remote_port}:{local_bind}:{local_port}"
+        else:
+            # 本地转发：-L local_bind:local_port:remote_host:remote_port
+            forward_arg = f"-L {local_bind}:{local_port}:{remote_host}:{remote_port}"
 
         # 构建完整命令
         cmd = [
@@ -516,15 +550,16 @@ class TunnelManager:
                 self._set_last_error(stderr_output or f"隧道 '{name}' 未能保持运行")
                 return None
 
-            # 测试隧道连通性
-            if not self.test_tunnel_connectivity(local_port):
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except:
-                    process.kill()
-                self._set_last_error(f"本地端口 {self.get_tunnel_local_bind(tunnel)}:{local_port} 未成功建立监听")
-                return None
+            # 测试隧道连通性（反向隧道监听在远端，跳过本地 TCP 探测）
+            if tunnel.get('tunnel_type', 'local') != 'remote':
+                if not self.test_tunnel_connectivity(local_port):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except:
+                        process.kill()
+                    self._set_last_error(f"本地端口 {self.get_tunnel_local_bind(tunnel)}:{local_port} 未成功建立监听")
+                    return None
 
             return process
 
