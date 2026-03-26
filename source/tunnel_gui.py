@@ -631,14 +631,30 @@ class TunnelGUI:
             self.delete_tunnel()
 
     def _get_tunnel_open_url(self, tunnel):
-        """构建本地端口的默认浏览器打开地址。"""
-        local_port = tunnel.get('local_port')
-        if not local_port:
-            return None
+        """构建默认浏览器打开地址。
 
-        local_bind = self.manager.get_tunnel_local_bind(tunnel)
-        browser_host = '127.0.0.1' if local_bind in {'0.0.0.0', '::', '::0', '[::]', '*'} else local_bind
-        return f"http://{browser_host}:{local_port}"
+        本地转发：http://local_bind:local_port
+        反向转发：http://ssh_host:remote_port（服务器暴露的端口）
+        """
+        tunnel_type = tunnel.get('tunnel_type', 'local')
+
+        if tunnel_type == 'remote':
+            remote_port = tunnel.get('remote_port')
+            if not remote_port:
+                return None
+            ssh_host = tunnel.get('ssh_host', '')
+            # 去掉 user@ 前缀，只保留主机名/IP
+            host = ssh_host.split('@')[-1] if ssh_host else ''
+            if not host:
+                return None
+            return f"http://{host}:{remote_port}"
+        else:
+            local_port = tunnel.get('local_port')
+            if not local_port:
+                return None
+            local_bind = self.manager.get_tunnel_local_bind(tunnel)
+            browser_host = '127.0.0.1' if local_bind in {'0.0.0.0', '::', '::0', '[::]', '*'} else local_bind
+            return f"http://{browser_host}:{local_port}"
 
     def _is_tunnel_name_unique(self, name, exclude_tunnel=None):
         """校验隧道名称是否唯一。"""
