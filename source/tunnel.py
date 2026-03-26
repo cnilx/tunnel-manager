@@ -501,6 +501,64 @@ class TunnelManager:
 
         return False
 
+    def test_remote_tunnel_connectivity(self, tunnel, timeout=5, max_retries=5):
+        """测试反向隧道连通性。
+
+        - remote_host 为通配符（0.0.0.0 等）时：从本机 TCP 直连 ssh_host:remote_port
+        - remote_host 为回环地址（127.0.0.1 等）时：SSH 到远端检查端口是否监听
+        """
+        remote_host = self.get_tunnel_remote_host(tunnel)
+        remote_port = tunnel.get('remote_port')
+        ssh_host = tunnel.get('ssh_host', '')
+        ssh_port = tunnel.get('ssh_port', 22)
+
+        if not remote_port or not ssh_host:
+            return False
+
+        wildcard_hosts = {'0.0.0.0', '*', '::', '::0', '[::]'}
+
+        if remote_host in wildcard_hosts:
+            # 方案 A：从本机 TCP 直连 ssh_host:remote_port
+            host = ssh_host.split('@')[-1]
+            for attempt in range(max_retries):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(timeout)
+                    result = sock.connect_ex((host, int(remote_port)))
+                    sock.close()
+                    if result == 0:
+                        return True
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                except Exception:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+            return False
+        else:
+            # 方案 B：SSH 到远端服务器，检查端口是否在监听
+            check_script = (
+                f'ss -tlnp 2>/dev/null | grep -q ":{remote_port} " || '
+                f'nc -z 127.0.0.1 {remote_port} 2>/dev/null'
+            )
+            check_cmd = [
+                'ssh', '-p', str(ssh_port),
+                '-o', 'ConnectTimeout=5',
+                '-o', 'BatchMode=yes',
+                '-o', 'StrictHostKeyChecking=no',
+                ssh_host, check_script
+            ]
+            for attempt in range(max_retries):
+                try:
+                    result = subprocess.run(check_cmd, timeout=15, capture_output=True)
+                    if result.returncode == 0:
+                        return True
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                except Exception:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+            return False
+
     def start_tunnel(self, tunnel):
         """启动单个隧道"""
         name = tunnel.get('name', '未命名隧道')
@@ -550,8 +608,20 @@ class TunnelManager:
                 self._set_last_error(stderr_output or f"隧道 '{name}' 未能保持运行")
                 return None
 
-            # 测试隧道连通性（反向隧道监听在远端，跳过本地 TCP 探测）
-            if tunnel.get('tunnel_type', 'local') != 'remote':
+            # 测试隧道连通性
+            if tunnel.get('tunnel_type', 'local') == 'remote':
+                # 反向隧道：端口监听在远端，需用专门方法检测
+                if not self.test_remote_tunnel_connectivity(tunnel):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except:
+                        process.kill()
+                    remote_host = self.get_tunnel_remote_host(tunnel)
+                    remote_port = tunnel.get('remote_port')
+                    self._set_last_error(f"远端端口 {remote_host}:{remote_port} 未成功建立监听")
+                    return None
+            else:
                 if not self.test_tunnel_connectivity(local_port):
                     process.terminate()
                     try:

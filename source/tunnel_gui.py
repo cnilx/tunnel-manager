@@ -1701,10 +1701,14 @@ class TunnelGUI:
                         continue
 
                     # 在锁外做连通性探测（纯读操作，避免持锁时间过长）
-                    # 反向隧道监听在远端服务器，无法从本机 TCP 探测，直接跳过
                     local_port = tunnel.get('local_port')
+                    tunnel_type = tunnel.get('tunnel_type', 'local')
                     port_reachable = None  # None 表示跳过探测
-                    if tunnel.get('tunnel_type', 'local') != 'remote' and isinstance(local_port, int) and 1 <= local_port <= 65535:
+                    if tunnel_type == 'remote':
+                        # 反向隧道：检测远端端口连通性（单次探测，避免监控循环阻塞）
+                        if tunnel.get('remote_port'):
+                            port_reachable = self.manager.test_remote_tunnel_connectivity(tunnel, max_retries=1)
+                    elif isinstance(local_port, int) and 1 <= local_port <= 65535:
                         try:
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                                 sock.settimeout(1.5)
